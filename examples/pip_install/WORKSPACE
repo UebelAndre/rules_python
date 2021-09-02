@@ -11,13 +11,6 @@ http_archive(
 load("@rules_python//python:pip.bzl", "pip_install")
 
 pip_install(
-    # (Optional) A name for the repository that will contain all dependencies.
-    # Uses the default repository name "pip" if unspecified
-    name = "pip_installed_deps",
-
-    # The requirements file used for defining dependencies
-    requirements = "//:requirements.txt",
-
     # (Optional) You can provide extra parameters to pip.
     # Here, make pip output verbose (this is usable with `quiet = False`).
     #extra_pip_args = ["-v"],
@@ -41,6 +34,9 @@ pip_install(
     # style env vars are read, but env vars that control requests and urllib3
     # can be passed
     #environment = {"HTTP_PROXY": "http://my.proxy.fun/"},
+
+    # Uses the default repository name "pip"
+    requirements = "//:requirements.txt",
 )
 
 # You could optionally use an in-build, compiled python interpreter as a toolchain,
