@@ -60,9 +60,11 @@ def compile_pip_requirements(
     deps = [
         requirement("click"),
         requirement("colorama"),
-        requirement("pip"),
+        requirement("pep517"),
         requirement("pip_tools"),
+        requirement("pip"),
         requirement("setuptools"),
+        requirement("tomli"),
     ]
 
     attrs = {
