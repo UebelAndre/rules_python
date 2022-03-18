@@ -130,6 +130,55 @@ def _pip_repository_impl(rctx):
     annotations_file = rctx.path("annotations.json")
     rctx.file(annotations_file, json.encode_indent(annotations, indent = " " * 4))
 
+    python_path_var = _construct_pypath(rctx)
+
+    # Check the version of python being used.
+    result = rctx.execute(
+        [
+            python_interpreter,
+            "--version",
+        ],
+        # Manually construct the PYTHONPATH since we cannot use the toolchain here
+        environment = {"PYTHONPATH": python_path_var},
+        timeout = rctx.attr.timeout,
+    )
+
+    if result.return_code:
+        fail("{} failed: {} ({})".format(rctx.name, result.stdout, result.stderr))
+
+    _, _, python_version = result.stdout.strip().rpartition(" ")
+
+    # Do not create a venv unless explicitly skipped or the interpreter is python2
+    venv_python_label = None
+    if not rctx.attr.skip_venv and not python_version.startswith("2"):
+        venv_name = ".venv-{}".format(rctx.name)
+        rctx.report_progress("Creating virtualenv")
+        result = rctx.execute(
+            [
+                python_interpreter,
+                "-m",
+                "venv",
+                venv_name,
+            ] + rctx.attr.venv_args,
+            # Manually construct the PYTHONPATH since we cannot use the toolchain here
+            environment = {"PYTHONPATH": python_path_var},
+            timeout = rctx.attr.timeout,
+            quiet = rctx.attr.quiet,
+        )
+
+        if result.return_code:
+            fail("{} failed: {} ({})".format(rctx.name, result.stdout, result.stderr))
+
+        if "win" in rctx.os.name:
+            venv_python_path = "{}/Scripts/python.exe".format(venv_name)
+        else:
+            venv_python_path = "{}/bin/python".format(venv_name)
+
+        # Track the label of the virtualenv's interpreter and override the current interpreter
+        # to this one for more hermetically sealed dependency generation.
+        venv_python_label = Label("@{}//:{}".format(rctx.name, venv_python_path))
+        python_interpreter = rctx.path(venv_python_path)
+
     if rctx.attr.incremental:
         args = [
             python_interpreter,
@@ -147,8 +196,13 @@ def _pip_repository_impl(rctx):
         ]
 
         args += ["--python_interpreter", _get_python_interpreter_attr(rctx)]
-        if rctx.attr.python_interpreter_target:
+
+        # The virutalenv python target should always be preferred
+        if venv_python_label:
+            args += ["--python_interpreter_target", str(venv_python_label)]
+        elif rctx.attr.python_interpreter_target:
             args += ["--python_interpreter_target", str(rctx.attr.python_interpreter_target)]
+
         progress_message = "Parsing requirements to starlark"
     else:
         args = [
@@ -170,7 +224,7 @@ def _pip_repository_impl(rctx):
     result = rctx.execute(
         args,
         # Manually construct the PYTHONPATH since we cannot use the toolchain here
-        environment = {"PYTHONPATH": _construct_pypath(rctx)},
+        environment = {"PYTHONPATH": python_path_var},
         timeout = rctx.attr.timeout,
         quiet = rctx.attr.quiet,
     )
@@ -256,10 +310,20 @@ For incremental mode the packages will be of the form
 @<prefix><sanitized-package-name>//...
 """,
     ),
+    "skip_venv": attr.bool(
+        doc = "Whether or not to skip creating a virutalenv for use in generating dependencies",
+        default = False,
+    ),
     # 600 is documented as default here: https://docs.bazel.build/versions/master/skylark/lib/repository_ctx.html#execute
     "timeout": attr.int(
         default = 600,
         doc = "Timeout (in seconds) on the rule's execution duration.",
+    ),
+    "venv_args": attr.string_list(
+        doc = (
+            "Additional arguments to pass to the [venv](https://docs.python.org/3/library/venv.html) module when " +
+            "creating the internal virtual environment for use in generating dependencies"
+        ),
     ),
     "_py_srcs": attr.label_list(
         doc = "Python sources used in the repository rule",
