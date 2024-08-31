@@ -92,6 +92,14 @@ Stamped targets are not rebuilt unless their dependencies change.
         default = -1,
         values = [1, 0, -1],
     ),
+    "stamp_affix": attr.string_list(
+        doc = (
+            "A list of exactly two strings that indicate the prefix and suffix of a stamp " +
+            "value. E.g. for `[\"{\", \"}\"]` and a stamp key of `BUILD_USER`, the replace string " +
+            "of the stamp will be `{BUILD_USER}`."
+        ),
+        default = ["{", "}"],
+    ),
     "version": attr.string(
         mandatory = True,
         doc = """\
@@ -340,6 +348,13 @@ def _py_wheel_impl(ctx):
     args.add("--out", outfile)
     args.add("--name_file", name_file)
     args.add_all(ctx.attr.strip_path_prefixes, format_each = "--strip_path_prefix=%s")
+
+    if len(ctx.attr.stamp_affix) != 2:
+        fail("Invalid `stamp_affix` attribute provided to `{}`: {}".format(
+            ctx.label,
+            ctx.attr.stamp_affix,
+        ))
+    args.add("--stamp_affix", json.encode(ctx.attr.stamp_affix))
 
     # Pass workspace status files if stamping is enabled
     if is_stamping_enabled(ctx.attr):

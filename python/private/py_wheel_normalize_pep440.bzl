@@ -129,7 +129,7 @@ def accept(parser, predicate, value):
 
     return False
 
-def accept_placeholder(parser):
+def accept_placeholder(parser, prefix, suffix):
     """Accept a Bazel placeholder.
 
     Placeholders aren't actually part of PEP 440, but are used for
@@ -142,21 +142,23 @@ def accept_placeholder(parser):
 
     Args:
       parser: The normalizer.
+      prefix (str): The stamp placeholder prefix
+      suffix (str): The stamp placeholder suffix
 
     Returns:
       whether a placeholder was accepted.
     """
     ctx = parser.open_context()
 
-    if not accept(parser, _is("{"), str):
+    if not accept(parser, _is(prefix), str):
         return parser.discard()
 
     start = ctx["start"]
     for _ in range(start, len(parser.input) + 1):
-        if not accept(parser, _is_not("}"), str):
+        if not accept(parser, _is_not(suffix), str):
             break
 
-    if not accept(parser, _is("}"), str):
+    if not accept(parser, _is(suffix), str):
         return parser.discard()
 
     return parser.accept()

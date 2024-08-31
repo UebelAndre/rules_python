@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import hashlib
 import os
 import re
@@ -23,6 +24,7 @@ import stat
 import sys
 import zipfile
 from pathlib import Path
+from typing import Tuple, List
 
 _ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
@@ -332,14 +334,17 @@ def get_files_to_package(input_files):
 
 
 def resolve_argument_stamp(
-    argument: str, volatile_status_stamp: Path, stable_status_stamp: Path
+    argument: str,
+    volatile_status_stamp: Path,
+    stable_status_stamp: Path,
+    stamp_affix: Tuple[str, str],
 ) -> str:
     """Resolve workspace status stamps format strings found in the argument string
 
     Args:
-        argument (str): The raw argument represenation for the wheel (may include stamp variables)
-        volatile_status_stamp (Path): The path to a volatile workspace status file
-        stable_status_stamp (Path): The path to a stable workspace status file
+        argument: The raw argument represenation for the wheel (may include stamp variables)
+        volatile_status_stamp: The path to a volatile workspace status file
+        stable_status_stamp: The path to a stable workspace status file
 
     Returns:
         str: A resolved argument string
@@ -348,14 +353,24 @@ def resolve_argument_stamp(
         volatile_status_stamp.read_text().splitlines()
         + stable_status_stamp.read_text().splitlines()
     )
+    prefix, suffix = stamp_affix
     for line in lines:
         if not line:
             continue
         key, value = line.split(" ", maxsplit=1)
-        stamp = "{" + key + "}"
+        stamp = prefix + key + suffix
         argument = argument.replace(stamp, value)
 
     return argument
+
+
+def _stamp_affix_arg(arg: str) -> Tuple[str, str]:
+    data = json.loads(arg)
+    if not isinstance(data, list):
+        raise ValueError("Expected a list for `--stamp_indicator`")
+    if len(data) != 2:
+        raise ValueError("Expected a list of length 2 for `--stamp_indicator`")
+    return data[0], data[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -459,6 +474,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Pass in the stamp info file for stamping",
     )
+    build_group.add_argument(
+        "--stamp_affix",
+        type=_stamp_affix_arg,
+        default=("{", "}"),
+        help="The prefix and suffix strings for stamp values.",
+    )
 
     return parser.parse_args(sys.argv[1:])
 
@@ -494,6 +515,7 @@ def main() -> None:
             arguments.name,
             arguments.volatile_status_file,
             arguments.stable_status_file,
+            arguments.stamp_affix,
         )
     else:
         name = arguments.name
@@ -503,6 +525,7 @@ def main() -> None:
             arguments.version,
             arguments.volatile_status_file,
             arguments.stable_status_file,
+            arguments.stamp_affix,
         )
     else:
         version = arguments.version
