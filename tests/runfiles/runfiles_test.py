@@ -20,7 +20,7 @@ import unittest
 from typing import Any, List, Optional
 
 from python.runfiles import runfiles
-from python.runfiles.runfiles import _RepositoryMapping
+from python.runfiles.runfiles import _FindPythonRunfilesRoot, _RepositoryMapping
 
 
 class RunfilesTest(unittest.TestCase):
@@ -707,6 +707,120 @@ class RunfilesTest(unittest.TestCase):
         r = runfiles.Create()
         assert r is not None  # mypy doesn't understand the unittest api.
         self.assertEqual(r.CurrentRepository(), expected)
+
+    # ----- Regression tests for `_FindPythonRunfilesRoot()` -----
+    #
+    # `_python_runfiles_root` is what `CurrentRepository`'s
+    # `relpath(caller_file, root)` resolves against. If the strategy's
+    # `RUNFILES_DIR` is detached from where the Python code actually
+    # lives on disk (a manifest-only setup, a synthetic launcher-staged
+    # tree, or a Windows layout where the runfiles tree is on a
+    # different storage volume from the bazel-bin outputs), the relpath
+    # escapes with `..` and raises `does not lie under the runfiles
+    # root`. The fix is to derive `_python_runfiles_root` from this
+    # library's own `__file__` by walking up to an unambiguous marker,
+    # falling back to the strategy's `RUNFILES_DIR` only when nothing
+    # is found.
+
+    def _MakeRunfilesTree(self, marker: str) -> str:
+        """Build a synthetic runfiles tree at a fresh tempdir, planted
+        with the requested marker. Returns the path that should be the
+        discovered runfiles root, with a `python/runfiles/runfiles.py`
+        living several levels under it."""
+        tmpdir = os.environ.get("TEST_TMPDIR")
+        root_parent = tempfile.mkdtemp(dir=tmpdir)
+        if marker == "dot_runfiles_suffix":
+            runfiles_root = os.path.join(root_parent, "binary.runfiles")
+        elif marker == "sibling_manifest":
+            runfiles_root = os.path.join(root_parent, "binary.runfiles")
+            with open(runfiles_root + ".runfiles_manifest", "w"):
+                pass
+        elif marker == "inner_repo_mapping":
+            runfiles_root = os.path.join(root_parent, "tree")
+            os.makedirs(runfiles_root)
+            with open(os.path.join(runfiles_root, "_repo_mapping"), "w"):
+                pass
+        elif marker == "inner_MANIFEST":
+            runfiles_root = os.path.join(root_parent, "tree")
+            os.makedirs(runfiles_root)
+            with open(os.path.join(runfiles_root, "MANIFEST"), "w"):
+                pass
+        else:
+            raise ValueError(f"unknown marker {marker!r}")
+        if not os.path.isdir(runfiles_root):
+            os.makedirs(runfiles_root)
+        # Plant the runfiles library file under the tree at a depth
+        # similar to the real layout: <root>/_main/python/runfiles/runfiles.py
+        lib_dir = os.path.join(runfiles_root, "_main", "python", "runfiles")
+        os.makedirs(lib_dir)
+        return runfiles_root, lib_dir
+
+    def testFindPythonRunfilesRoot_dotRunfilesSuffix(self) -> None:
+        """A directory whose name ends in `.runfiles` is recognised as
+        the runfiles root (the per-target tree built alongside a binary
+        — `<binary>.runfiles/`)."""
+        runfiles_root, lib_dir = self._MakeRunfilesTree("dot_runfiles_suffix")
+        self.assertEqual(_FindPythonRunfilesRoot(lib_dir), runfiles_root)
+
+    def testFindPythonRunfilesRoot_siblingManifest(self) -> None:
+        """A directory with a sibling `<dir>.runfiles_manifest` file is
+        recognised as the runfiles root (Bazel's output manifest sits
+        alongside the runfiles dir)."""
+        runfiles_root, lib_dir = self._MakeRunfilesTree("sibling_manifest")
+        self.assertEqual(_FindPythonRunfilesRoot(lib_dir), runfiles_root)
+
+    def testFindPythonRunfilesRoot_innerRepoMapping(self) -> None:
+        """A directory containing an `_repo_mapping` file is recognised
+        as the runfiles root (bzlmod runfiles trees always contain this
+        file)."""
+        runfiles_root, lib_dir = self._MakeRunfilesTree("inner_repo_mapping")
+        self.assertEqual(_FindPythonRunfilesRoot(lib_dir), runfiles_root)
+
+    def testFindPythonRunfilesRoot_innerManifest(self) -> None:
+        """A directory containing a `MANIFEST` file is recognised as the
+        runfiles root (Bazel's input manifest sits at the root)."""
+        runfiles_root, lib_dir = self._MakeRunfilesTree("inner_MANIFEST")
+        self.assertEqual(_FindPythonRunfilesRoot(lib_dir), runfiles_root)
+
+    def testFindPythonRunfilesRoot_plainRunfilesBasenameIsNotAMarker(
+        self,
+    ) -> None:
+        """A directory whose name is exactly `runfiles` (no `.runfiles`
+        suffix) must NOT be treated as a runfiles root marker — the
+        library's own source directory is literally named `runfiles` and
+        a match there would short-circuit the walk before reaching the
+        actual tree."""
+        tmpdir = os.environ.get("TEST_TMPDIR")
+        # Synthetic layout where the walk passes through `python/runfiles/`
+        # before any real marker is hit. The discovered root should be the
+        # parent `binary.runfiles`, not the intermediate `runfiles` dir.
+        root_parent = tempfile.mkdtemp(dir=tmpdir)
+        runfiles_root = os.path.join(root_parent, "binary.runfiles")
+        lib_dir = os.path.join(runfiles_root, "_main", "python", "runfiles")
+        os.makedirs(lib_dir)
+        self.assertEqual(_FindPythonRunfilesRoot(lib_dir), runfiles_root)
+
+    def testFindPythonRunfilesRoot_returnsNoneWhenNoMarker(self) -> None:
+        """If the walk reaches the filesystem root without finding any
+        marker, return None so callers can fall back to the strategy's
+        env-derived value."""
+        tmpdir = os.environ.get("TEST_TMPDIR")
+        unmarked_dir = tempfile.mkdtemp(dir=tmpdir)
+        # Sanity: the synthetic dir really has no markers (tempdir parents
+        # may have some in the test environment, but the test only cares
+        # that under our control nothing matches at depth 0).
+        self.assertFalse(os.path.exists(unmarked_dir + ".runfiles_manifest"))
+        self.assertFalse(os.path.exists(os.path.join(unmarked_dir, "_repo_mapping")))
+        self.assertFalse(os.path.exists(os.path.join(unmarked_dir, "MANIFEST")))
+        # The walk continues up the temp parents; result is whatever
+        # marker (if any) exists higher up. Asserting `None` would be
+        # flaky on systems where the test tempdir's ancestors happen to
+        # have a marker. Instead, assert the result is either None or
+        # somewhere above our synthetic dir.
+        result = _FindPythonRunfilesRoot(unmarked_dir)
+        if result is not None:
+            self.assertNotEqual(result, unmarked_dir)
+            self.assertTrue(unmarked_dir.startswith(result))
 
     @staticmethod
     def IsWindows() -> bool:

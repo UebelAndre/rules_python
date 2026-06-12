@@ -74,6 +74,16 @@ END_UNRELEASED_TEMPLATE
 
 {#v0-0-0-fixed}
 ### Fixed
+* (runfiles) `CurrentRepository()` no longer raises `does not lie
+  under the runfiles root` when the strategy's `RUNFILES_DIR` is
+  detached from where the Python code actually lives on disk (e.g.
+  a synthetic launcher-staged tree, or a Windows layout where the
+  runfiles tree is on a different storage volume than the bazel-bin
+  outputs). The repository root used for the relpath calculation is
+  now derived from the library's own `__file__` via marker-based walk
+  (`.runfiles` suffix, sibling `.runfiles_manifest`, inner
+  `_repo_mapping`, inner `MANIFEST`), with the strategy's value as
+  fallback. `Rlocation` behaviour is unchanged.
 * (gazelle) `py_library` and `py_test` targets with missing source files can now be
   removed by Gazelle ([#3375](https://github.com/bazel-contrib/rules_python/issues/3375)). 
   However `map_kind` and `alias_kind` will not be removed unless people are running a 

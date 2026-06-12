@@ -491,6 +491,58 @@ class _DirectoryBased:
         }
 
 
+def _FindPythonRunfilesRoot(start_path: Optional[str] = None) -> Optional[str]:
+    """Finds the root of the Python runfiles tree by walking up from this
+    library's own file location.
+
+    Looks for any of these unambiguous runfile-tree markers at each
+    candidate:
+      - the directory's name ends in `.runfiles` (per-target runfiles
+        tree alongside a built binary, e.g. `<binary>.runfiles/`),
+      - a sibling `<dir>.runfiles_manifest` file exists (Bazel's output
+        manifest sits next to the runfiles dir),
+      - an `_repo_mapping` file exists inside (always present in bzlmod
+        runfiles trees and what `Runfiles.__init__` itself reads),
+      - a `MANIFEST` file exists inside (Bazel's input manifest at the
+        runfiles root).
+
+    Plain basename `runfiles` is intentionally NOT a marker — the
+    library's own source directory is literally named `runfiles`, so
+    matching on it would short-circuit the walk before reaching the
+    actual tree root.
+
+    Robust to varying install depth (rules_pycross installs the runfiles
+    library via pypi at a different depth than in-tree usage) by
+    matching on markers rather than counting levels.
+
+    Args:
+      start_path: optional directory to start the walk from. Defaults to
+        the directory containing this library file. Exposed primarily for
+        tests that want to verify marker-matching behaviour against
+        synthetic directory trees.
+
+    Returns the discovered root, or None if no marker was found before
+    reaching the filesystem root. Callers should fall back to the
+    strategy's `_GetRunfilesDir()` in the None case.
+    """
+    candidate = (
+        start_path if start_path is not None else os.path.dirname(os.path.abspath(__file__))
+    )
+    while True:
+        if os.path.basename(candidate).endswith(".runfiles"):
+            return candidate
+        if os.path.exists(candidate + ".runfiles_manifest"):
+            return candidate
+        if os.path.exists(os.path.join(candidate, "_repo_mapping")):
+            return candidate
+        if os.path.exists(os.path.join(candidate, "MANIFEST")):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return None
+        candidate = parent
+
+
 class Runfiles:
     """Returns the runtime location of runfiles.
 
@@ -499,7 +551,27 @@ class Runfiles:
 
     def __init__(self, strategy: Union[_ManifestBased, _DirectoryBased]) -> None:
         self._strategy = strategy
+        # `_python_runfiles_root` is the runtime runfiles tree path — used
+        # by `Path.__str__` / `Path.runfiles_root()` to render strings
+        # that resolve to real files under the strategy's tree. Keep it
+        # strategy-derived so callers that synthesise trees via
+        # `Create(env={"RUNFILES_DIR": ...})` get the expected
+        # round-trip.
         self._python_runfiles_root = strategy._GetRunfilesDir()
+        # `_caller_inspection_root` is the root used by
+        # `CurrentRepository`'s `relpath(caller_file, root)` to figure
+        # out which repository the caller belongs to. It must reflect
+        # where the Python code actually lives on disk — NOT the
+        # strategy's `RUNFILES_DIR`, which can be detached from the
+        # on-disk tree (a synthetic launcher-staged tree, a manifest-
+        # only setup, or a Windows layout where the runfiles tree is on
+        # a different storage volume from the bazel-bin outputs).
+        # `__file__`-based discovery with marker-based walking handles
+        # all of those; fall back to the strategy's value only when no
+        # marker is found.
+        self._caller_inspection_root = (
+            _FindPythonRunfilesRoot() or strategy._GetRunfilesDir()
+        )
         self._repo_mapping = _RepositoryMapping.create_from_file(
             strategy.RlocationChecked("_repo_mapping")
         )
@@ -639,7 +711,7 @@ class Runfiles:
             caller_path = inspect.getfile(sys._getframe(frame))
         except (TypeError, ValueError) as exc:
             raise ValueError("failed to determine caller's file path") from exc
-        caller_runfiles_path = os.path.relpath(caller_path, self._python_runfiles_root)
+        caller_runfiles_path = os.path.relpath(caller_path, self._caller_inspection_root)
         if caller_runfiles_path.startswith(".." + os.path.sep):
             # With Python 3.10 and earlier, sys.path contains the directory
             # of the script, which can result in a module being loaded from
@@ -656,11 +728,11 @@ class Runfiles:
             #       by parsing the script's path.
             if (sys.version_info.minor <= 10 or sys.platform == "win32") and sys.path[
                 0
-            ] != self._python_runfiles_root:
+            ] != self._caller_inspection_root:
                 return ""
             raise ValueError(
                 "{} does not lie under the runfiles root {}".format(
-                    caller_path, self._python_runfiles_root
+                    caller_path, self._caller_inspection_root
                 )
             )
 
